@@ -1,7 +1,7 @@
 # Code copied from other ezgamehost repositories, refreshed by scripts/sync-copies.sh <repository>.
 # <repository> <commit> <path, the same there and here>
-ezgh-cloud-controller ca6a01e187c29e5c0dc7d26ff86e4697c71bbb6e internal/ezghclient
-ezgh-cloud-controller ca6a01e187c29e5c0dc7d26ff86e4697c71bbb6e internal/cloud/ccm
-ezgh-cloud-controller ca6a01e187c29e5c0dc7d26ff86e4697c71bbb6e internal/cloud/config
-ezgh-cloud-controller ca6a01e187c29e5c0dc7d26ff86e4697c71bbb6e internal/cloud/events
-ezgh-cloud-controller ca6a01e187c29e5c0dc7d26ff86e4697c71bbb6e internal/cloud/run
+ezgh-cloud-controller c6d08b4bc81b7415a32bc0b4f976f0ebb68a61a5 internal/ezghclient
+ezgh-cloud-controller c6d08b4bc81b7415a32bc0b4f976f0ebb68a61a5 internal/cloud/ccm
+ezgh-cloud-controller c6d08b4bc81b7415a32bc0b4f976f0ebb68a61a5 internal/cloud/config
+ezgh-cloud-controller c6d08b4bc81b7415a32bc0b4f976f0ebb68a61a5 internal/cloud/events
+ezgh-cloud-controller c6d08b4bc81b7415a32bc0b4f976f0ebb68a61a5 internal/cloud/run
