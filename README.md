@@ -1,65 +1,74 @@
 # ezgh-csi
 
-The CSI drivers for EZGH Kubernetes, the counterpart of aws-ebs-csi-driver and aws-efs-csi-driver:
+[Container Storage Interface](https://kubernetes-csi.github.io/docs/) drivers for
+[EZGH Kubernetes](https://docs.ezghcloud.com), backed by EZGH Block Storage and EZGH Files.
 
-| Driver | Storage |
-| --- | --- |
-| `blockstore.csi.ezghcloud.com` | EZGH Block Storage volumes and snapshots (dynamic provisioning, attach, expand, snapshots) |
-| `files.csi.ezghcloud.com` | EZGH Files file systems over NFS 4.1 (an access point per dynamic volume, or a static `fsy_` volume) |
+EZGH Kubernetes installs and upgrades these drivers as the `blockstore-csi` and `files-csi`
+add-ons. This repository holds their source code; you don't need to deploy them yourself.
 
-Two binaries:
+## Drivers
 
-| Binary | Runs | How |
+| Driver | Backed by | Capabilities |
 | --- | --- | --- |
-| `ezgh-csi-node` | `blockstore` or `files`: the node plugin, on every node | the `ezgh-csi-node` image, in the blockstore-csi and files-csi add-ons' DaemonSets beside node-driver-registrar |
-| `ezgh-csi-controller` | `csi-blockstore-controller` on `/run/ezgh/csi/blockstore.sock`, `csi-files-controller` on `/run/ezgh/csi/files.sock`: the controller plugins, on each control-plane VM | systemd units `ezgh-cloud@csi-blockstore-controller` and `ezgh-cloud@csi-files-controller`, called by the upstream external-provisioner, attacher, resizer and snapshotter |
+| `blockstore.csi.ezghcloud.com` | EZGH Block Storage | Dynamic provisioning, live attach and detach, online expansion, snapshots and restore (`ReadWriteOnce`) |
+| `files.csi.ezghcloud.com` | EZGH Files | Shared file systems over NFS 4.1 with optional TLS, an access point per dynamically provisioned volume, or static volumes on an existing file system (`ReadWriteMany`) |
 
-The controllers act on EZGH's public APIs as the cluster's Bot, with credentials from the local agent
-(`http://127.0.0.1:9444/v1/cluster-credentials`), and read `/etc/ezgh/cloud.json` and
-`/etc/ezgh/kubeconfig/ezgh-cloud.conf`; `EZGH_CLOUD_CONFIG`, `EZGH_CLOUD_KUBECONFIG` and
-`EZGH_CREDENTIALS_URL` override them for local runs. They delete only volumes and access points
-tagged with their own cluster. Logs are JSON lines through the vendored kit (`internal/kit/logging`).
+The drivers only modify or delete volumes and access points tagged as belonging to their own
+cluster.
 
-## Build and test
+## Components
 
-Go 1.27.1 (`go.mod`).
+| Binary | Runs on | Purpose |
+| --- | --- | --- |
+| `ezgh-csi-node` | Every node, as a DaemonSet | Node plugin: formats, mounts, unmounts and grows volumes |
+| `ezgh-csi-controller` | The cluster's control plane | Controller plugin: creates, attaches, expands, snapshots and deletes volumes through the EZGH APIs, called by the standard CSI sidecars |
+
+The controller acts as the cluster's Bot with short-lived credentials from the control plane's
+local agent. It reads its configuration from `/etc/ezgh/cloud.json` and
+`/etc/ezgh/kubeconfig/ezgh-cloud.conf`; set `EZGH_CLOUD_CONFIG`, `EZGH_CLOUD_KUBECONFIG` and
+`EZGH_CREDENTIALS_URL` to override them for local development. Logs are structured JSON.
+
+## Container image and binaries
+
+| Artifact | Location |
+| --- | --- |
+| Node plugin image (linux/amd64) | `q5zljyjh52il.registry.ezghcloud.com/kubernetes/ezgh-csi-node:<version>` |
+| Binaries (linux/amd64, linux/arm64) with `SHA256SUMS` | [GitHub Releases](https://github.com/ezgamehost/ezgh-csi/releases) |
+
+## Building from source
+
+Requires Go 1.27.1 or later.
+
+```sh
+CGO_ENABLED=0 GOOS=linux go build ./cmd/...
+docker build .
+```
+
+## Testing
 
 | Check | Command |
 | --- | --- |
-| Build | `CGO_ENABLED=0 GOOS=linux go build ./cmd/...` |
-| Image | `docker build .` (Ubuntu with e2fsprogs, xfsprogs, util-linux and nfs-common: the node plugin formats, mounts and grows file systems) |
-| Tests | `go test -race $(go list ./... \| grep -v /internal/kit/)` |
-| Lint | `gofmt -l .`; `go vet` and `go run honnef.co/go/tools/cmd/staticcheck@v0.8.1` over `$(go list ./... \| grep -v /internal/kit/)` (service-template checks the kit) |
+| Unit tests | `go test -race $(go list ./... \| grep -v /internal/kit/)` |
+| Lint | `gofmt -l .`, `go vet` and `staticcheck` |
 | Logging | `scripts/check-logging.sh` |
 
-CI (`.github/workflows/ci.yml`) runs them and builds the image, without pushing it, on every pull
-request and push to main.
+Continuous integration runs these and builds the image on every pull request and push to `main`.
 
 ## Releases
 
-Push a tag `vX.Y.Z` on main. `.github/workflows/release.yml` publishes the GitHub release
-(`ezgh-csi-node-linux-{amd64,arm64}`, `ezgh-csi-controller-linux-{amd64,arm64}`, `SHA256SUMS`) and
-pushes the linux/amd64 image to the kubernetes-addons Registry as
-`<host>/kubernetes/ezgh-csi-node:<tag>`. The image goes first and the binaries only after it, from GitHub Environment `release`
-(limited to tags `v*`): secret `KUBERNETES_ADDONS_REGISTRY_KEY` (a platform-organization Bot key that can push to project
-kubernetes-addons) and variable `KUBERNETES_ADDONS_REGISTRY_HOST` (`<hostId>.registry.ezghcloud.com`).
-A published tag never moves: a fix ships as a new version. The add-on bundle runs the image's
-commands and flags as they are: changing one needs a new bundle version in kubernetes-stack too.
+Releases follow semantic versioning. Pushing a `vX.Y.Z` tag on `main` publishes the container image
+and then the binaries. Published versions are immutable; fixes ship as new versions.
 
-kubernetes-stack consumes both: the `blockstore-csi` and `files-csi` add-on bundles pin the image in
-their `images.json` (`ezgh-csi-node`), and the control-plane payload pins `ezgh-csi-controller` by
-version and SHA-256 in `deploy/images/releases.txt`. The systemd units (a drop-in points
-`ezgh-cloud@csi-*-controller` at this binary) and the sidecars live in kubernetes-stack.
+## Vendored code
 
-## Copied code
+`internal/kit`, `internal/ezghclient` and parts of `internal/cloud` are vendored from shared EZGH
+libraries and refreshed with `scripts/sync-kit.sh` and `scripts/sync-copies.sh`. Changes to them
+are made upstream.
 
-Other repositories' code is copied in, not imported, each copy with its own sync:
+## Security
 
-| Path | Source | Sync |
-| --- | --- | --- |
-| `internal/kit` | ezgamehost/service-template `kit/go` (commit in `internal/kit/KIT_VERSION`) | `scripts/sync-kit.sh` |
-| `internal/ezghclient`, `internal/cloud/{ccm,config,events,run}` | ezgamehost/ezgh-cloud-controller (commit in `COPIES`); its `internal/ezghclient` is itself ezgh-cli's API clients plus its own additions | `scripts/sync-copies.sh ezgh-cloud-controller` |
+Please report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
 ## License
 
-Apache-2.0 ([LICENSE](LICENSE)). Security reports: [SECURITY.md](SECURITY.md).
+Licensed under the [Apache License 2.0](LICENSE).
