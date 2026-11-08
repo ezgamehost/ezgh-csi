@@ -455,25 +455,47 @@ func (c *Controller) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshot
 	if err != nil {
 		return nil, err
 	}
-	op, err := c.Blockstore.CreateSnapshot(ezghclient.WithIdempotencyKey(ctx, "csi-"+req.GetName()), cfg.Org, cfg.Project, blockstoreapi.SnapshotCreate{
-		VolumeID: req.GetSourceVolumeId(), Name: req.GetName(), Tags: cloudcsi.Tags(cfg, req.GetParameters()),
-	})
+	s, err := c.createSnapshot(ctx, cfg, req)
 	if err != nil {
-		return nil, cloudcsi.APIStatus(err, createConflicts)
-	}
-	// A retry replays the first answer: read the snapshot as it is now.
-	s, err := c.Blockstore.GetSnapshot(ctx, cfg.Org, cfg.Project, op.Snapshot.Slug)
-	if err != nil {
-		return nil, cloudcsi.APIStatus(err, nil)
-	}
-	if s.Status == "failed" {
-		return nil, status.Errorf(codes.Internal, "snapshot %s failed", s.Slug)
+		return nil, err
 	}
 	created, _ := time.Parse(time.RFC3339Nano, s.CreatedAt)
 	return &csi.CreateSnapshotResponse{Snapshot: &csi.Snapshot{
 		SnapshotId: s.Slug, SourceVolumeId: s.Volume, SizeBytes: bytes(s.VolumeSizeBytes),
 		CreationTime: timestamppb.New(created), ReadyToUse: s.Status == "available",
 	}}, nil
+}
+
+// createSnapshot is createVolume's chain for snapshots: a snapshot that failed (or is being
+// deleted, or is gone) is deleted and replaced under csi-<name>-<its snp_>, so a retry walks the
+// same chain instead of replaying the failure for the key's lifetime.
+func (c *Controller) createSnapshot(ctx context.Context, cfg config.Config, req *csi.CreateSnapshotRequest) (*blockstoreapi.Snapshot, error) {
+	key := "csi-" + req.GetName()
+	for link := 1; ; link++ {
+		op, err := c.Blockstore.CreateSnapshot(ezghclient.WithIdempotencyKey(ctx, key), cfg.Org, cfg.Project, blockstoreapi.SnapshotCreate{
+			VolumeID: req.GetSourceVolumeId(), Name: req.GetName(), Tags: cloudcsi.Tags(cfg, req.GetParameters()),
+		})
+		if err != nil {
+			return nil, cloudcsi.APIStatus(err, createConflicts)
+		}
+		id := op.Snapshot.Slug
+		// A retry replays the first answer: read the snapshot as it is now.
+		s, err := c.Blockstore.GetSnapshot(ctx, cfg.Org, cfg.Project, id)
+		gone := ezghclient.IsNotFound(err)
+		if err != nil && !gone {
+			return nil, cloudcsi.APIStatus(err, nil)
+		}
+		if !gone && s.Status != "failed" && s.Status != "deleting" {
+			return s, nil
+		}
+		if !gone && s.Status == "failed" {
+			_, _ = c.Blockstore.DeleteSnapshot(ctx, cfg.Org, cfg.Project, id) // best effort; tagged with the cluster
+		}
+		if link == createLinks {
+			return nil, status.Errorf(codes.Internal, "snapshot %s failed, as did the %d before it", id, createLinks-1)
+		}
+		key = "csi-" + req.GetName() + "-" + id
+	}
 }
 
 func (c *Controller) DeleteSnapshot(ctx context.Context, req *csi.DeleteSnapshotRequest) (*csi.DeleteSnapshotResponse, error) {

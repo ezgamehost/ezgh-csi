@@ -40,14 +40,15 @@ type request struct {
 // fakeEZGH serves blockstore-api and compute-api on one server. Volumes and instances live in
 // maps; deny names a path suffix answered 403 for an action; answer overrides a path suffix.
 type fakeEZGH struct {
-	mu        sync.Mutex
-	reqs      []request
-	volumes   map[string]map[string]any
-	snapshots map[string]map[string]any
-	instances map[string]string // ins_ → status; missing is 404
-	answer    map[string]func(w http.ResponseWriter, body map[string]any)
-	deny      map[string]string
-	failNext  int // new volumes that end failed
+	mu            sync.Mutex
+	reqs          []request
+	volumes       map[string]map[string]any
+	snapshots     map[string]map[string]any
+	instances     map[string]string // ins_ → status; missing is 404
+	answer        map[string]func(w http.ResponseWriter, body map[string]any)
+	deny          map[string]string
+	failNext      int // new volumes that end failed
+	failSnapshots int // new snapshots that end failed
 }
 
 func newFake(t *testing.T) (*fakeEZGH, *ezghclient.Clients) {
@@ -139,11 +140,25 @@ func (f *fakeEZGH) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.volumes[parts[1]]["sizeBytes"] = body["sizeBytes"]
 		writeJSON(w, 202, op("ModifyVolume", map[string]any{"volume": f.volumes[parts[1]]}))
 	case r.Method == "POST" && path == "/snapshots":
-		id := "snp_000000000001"
-		f.snapshots[id] = map[string]any{"slug": id, "status": "creating", "volume": body["volumeId"], "volumeSizeBytes": "1073741824", "createdAt": "2026-11-06T10:00:00.000Z"}
+		for _, s := range f.snapshots { // idempotent by key, as the service is
+			if s["key"] != nil && s["key"] == r.Header.Get("Idempotency-Key") {
+				writeJSON(w, 202, op("CreateSnapshot", map[string]any{"snapshot": s}))
+				return
+			}
+		}
+		id := fmt.Sprintf("snp_%012d", len(f.snapshots)+1)
+		st := "creating"
+		if f.failSnapshots > 0 {
+			f.failSnapshots--
+			st = "failed"
+		}
+		f.snapshots[id] = map[string]any{"slug": id, "status": st, "key": r.Header.Get("Idempotency-Key"), "volume": body["volumeId"], "volumeSizeBytes": "1073741824", "createdAt": "2026-11-06T10:00:00.000Z"}
 		writeJSON(w, 202, op("CreateSnapshot", map[string]any{"snapshot": f.snapshots[id]}))
 	case len(parts) == 2 && parts[0] == "snapshots":
-		if s, ok := f.snapshots[parts[1]]; ok && r.Method == "DELETE" {
+		if s, ok := f.snapshots[parts[1]]; ok && r.Method == "DELETE" && s["status"] == "failed" {
+			s["status"] = "deleting" // kept, so a replay of its create still names it
+			writeJSON(w, 202, op("DeleteSnapshot", nil))
+		} else if ok && r.Method == "DELETE" {
 			delete(f.snapshots, parts[1])
 			writeJSON(w, 202, op("DeleteSnapshot", nil))
 		} else if ok {
@@ -495,6 +510,39 @@ func TestSnapshot(t *testing.T) {
 	}
 	if _, err := c.DeleteSnapshot(context.Background(), &csi.DeleteSnapshotRequest{SnapshotId: "snp_gone00000000"}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A failed snapshot is deleted and replaced under a key chained to it; a deleting one is skipped.
+func TestSnapshotReplacesFailed(t *testing.T) {
+	c, f := newController(t)
+	f.failSnapshots = 1
+	req := &csi.CreateSnapshotRequest{Name: "snapshot-1", SourceVolumeId: "vol_aaaaaaaaaaaa"}
+	r, err := c.CreateSnapshot(context.Background(), req)
+	if err != nil || r.Snapshot.SnapshotId != "snp_000000000002" || r.Snapshot.ReadyToUse {
+		t.Fatal(r, err)
+	}
+	if p := f.posts("/snapshots"); len(p) != 2 || !strings.HasPrefix(p[1].Key, "csi-snapshot-1-snp_000000000001") {
+		t.Fatal(p)
+	}
+	if f.snapshots["snp_000000000001"]["status"] != "deleting" {
+		t.Fatal(f.snapshots)
+	}
+	// A retry walks the same chain: the deleting first link moves on to the second.
+	r, err = c.CreateSnapshot(context.Background(), req)
+	if err != nil || r.Snapshot.SnapshotId != "snp_000000000002" || len(f.snapshots) != 2 {
+		t.Fatal(r, err, f.snapshots)
+	}
+	// Every link failing ends the chain with an error, each failed link deleted.
+	c, f = newController(t)
+	f.failSnapshots = createLinks
+	if _, err := c.CreateSnapshot(context.Background(), req); code(err) != codes.Internal || len(f.snapshots) != createLinks {
+		t.Fatal(err, len(f.snapshots))
+	}
+	for id, s := range f.snapshots {
+		if s["status"] != "deleting" {
+			t.Fatal(id, s)
+		}
 	}
 }
 
