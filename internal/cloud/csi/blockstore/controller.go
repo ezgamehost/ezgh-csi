@@ -179,15 +179,15 @@ func (c *Controller) createVolume(ctx context.Context, cfg config.Config, name s
 		if !gone && v.Status != "failed" && v.Status != "deleting" {
 			return v, nil
 		}
+		if !gone && v.Status == "failed" {
+			_, _ = c.Blockstore.DeleteVolume(ctx, cfg.Org, cfg.Project, id) // best effort; the volume is tagged with the cluster
+		}
 		if link == createLinks {
 			reason := "it no longer exists"
 			if !gone && v.FailureReason != nil {
 				reason = *v.FailureReason
 			}
 			return nil, status.Errorf(codes.Internal, "volume %s failed (%s), as did the %d before it", id, reason, createLinks-1)
-		}
-		if !gone && v.Status == "failed" {
-			_, _ = c.Blockstore.DeleteVolume(ctx, cfg.Org, cfg.Project, id) // best effort; the volume is tagged with the cluster
 		}
 		key = "csi-" + name + "-" + id
 	}

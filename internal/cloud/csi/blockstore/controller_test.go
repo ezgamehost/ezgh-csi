@@ -617,8 +617,8 @@ func TestCreateVolumeReplacesFailed(t *testing.T) {
 	// Every link failing ends the chain with an error.
 	c, f = newController(t)
 	f.failNext = createLinks
-	if _, err := c.CreateVolume(context.Background(), req); code(err) != codes.Internal || len(f.volumes) != createLinks {
-		t.Fatal(err, len(f.volumes))
+	if _, err := c.CreateVolume(context.Background(), req); code(err) != codes.Internal || len(f.volumes) != createLinks || f.volumes["vol_000000000003"]["status"] != "deleting" {
+		t.Fatal(err, f.volumes)
 	}
 }
 

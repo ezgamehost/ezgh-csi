@@ -191,15 +191,15 @@ func (c *Controller) createAccessPoint(ctx context.Context, cfg config.Config, n
 		if !gone {
 			id = ap.Slug
 		}
+		if !gone && ap.Status == "failed" {
+			_, _ = c.EZGH.Files.DeleteAccessPoint(ctx, cfg.Org, cfg.Project, id) // best effort; it's tagged with the cluster
+		}
 		if link == createLinks {
 			reason := "it no longer exists"
 			if !gone && ap.Failure != nil {
 				reason = ap.Failure.Message
 			}
 			return nil, status.Errorf(codes.Internal, "access point %s failed (%s), as did the %d before it", id, reason, createLinks-1)
-		}
-		if !gone && ap.Status == "failed" {
-			_, _ = c.EZGH.Files.DeleteAccessPoint(ctx, cfg.Org, cfg.Project, id) // best effort; it's tagged with the cluster
 		}
 		// The operation's target ID, whichever branch: the failed one read as failed on one try
 		// and as gone on the next must give the same key, or a retry orphans a link.

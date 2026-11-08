@@ -268,6 +268,17 @@ func TestCreateReplacesFailed(t *testing.T) {
 	}
 }
 
+func TestCreateReplacesFailedLastLink(t *testing.T) {
+	c, f := newController(t)
+	f.failNext = createLinks
+	if _, err := create(c, map[string]string{"fileSystem": "fsy_aaaaaaaaaaaa"}); code(err) != codes.Internal {
+		t.Fatal(err)
+	}
+	if d := f.requests("DELETE", "/access-points/fap_000000000003"); len(d) != 1 {
+		t.Fatal(d)
+	}
+}
+
 func TestFileSystemRequired(t *testing.T) {
 	for _, params := range []map[string]string{
 		{},
