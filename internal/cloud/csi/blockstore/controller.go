@@ -479,11 +479,11 @@ func (c *Controller) createSnapshot(ctx context.Context, cfg config.Config, req 
 			return nil, cloudcsi.APIStatus(err, createConflicts)
 		}
 		id := op.Snapshot.Slug
-		// A retry replays the first answer: read the snapshot as it is now.
-		s, err := c.Blockstore.GetSnapshot(ctx, cfg.Org, cfg.Project, id)
-		gone := ezghclient.IsNotFound(err)
+		// Wait out creating before an ID is returned: the snapshotter keeps the first ID it gets.
+		s, err := c.waitSnapshot(ctx, cfg, id)
+		gone := status.Code(err) == codes.NotFound
 		if err != nil && !gone {
-			return nil, cloudcsi.APIStatus(err, nil)
+			return nil, err
 		}
 		if !gone && s.Status != "failed" && s.Status != "deleting" {
 			return s, nil
@@ -492,9 +492,30 @@ func (c *Controller) createSnapshot(ctx context.Context, cfg config.Config, req 
 			_, _ = c.Blockstore.DeleteSnapshot(ctx, cfg.Org, cfg.Project, id) // best effort; tagged with the cluster
 		}
 		if link == createLinks {
-			return nil, status.Errorf(codes.Internal, "snapshot %s failed, as did the %d before it", id, createLinks-1)
+			reason := "it no longer exists"
+			if !gone && s.Status == "failed" {
+				reason = "failed"
+			}
+			return nil, status.Errorf(codes.Internal, "snapshot %s %s, as did the %d before it", id, reason, createLinks-1)
 		}
 		key = "csi-" + req.GetName() + "-" + id
+	}
+}
+
+// waitSnapshot polls until the snapshot leaves creating; Aborted when createWait passes.
+func (c *Controller) waitSnapshot(ctx context.Context, cfg config.Config, id string) (*blockstoreapi.Snapshot, error) {
+	deadline := time.Now().Add(createWait)
+	for {
+		s, err := c.Blockstore.GetSnapshot(ctx, cfg.Org, cfg.Project, id)
+		if err != nil {
+			return nil, cloudcsi.APIStatus(err, nil)
+		}
+		if s.Status != "creating" {
+			return s, nil
+		}
+		if err := sleep(ctx, deadline); err != nil {
+			return nil, status.Errorf(codes.Aborted, "snapshot %s is still creating", id)
+		}
 	}
 }
 

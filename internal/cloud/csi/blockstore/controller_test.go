@@ -49,6 +49,8 @@ type fakeEZGH struct {
 	deny          map[string]string
 	failNext      int // new volumes that end failed
 	failSnapshots int // new snapshots that end failed
+	snapSeq       int
+	snapCreating  bool // new snapshots stay creating until the test flips them
 }
 
 func newFake(t *testing.T) (*fakeEZGH, *ezghclient.Clients) {
@@ -146,8 +148,12 @@ func (f *fakeEZGH) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		id := fmt.Sprintf("snp_%012d", len(f.snapshots)+1)
-		st := "creating"
+		f.snapSeq++
+		id := fmt.Sprintf("snp_%012d", f.snapSeq)
+		st := "available"
+		if f.snapCreating {
+			st = "creating"
+		}
 		if f.failSnapshots > 0 {
 			f.failSnapshots--
 			st = "failed"
@@ -494,7 +500,7 @@ func TestSnapshot(t *testing.T) {
 	c, f := newController(t)
 	req := &csi.CreateSnapshotRequest{Name: "snapshot-1", SourceVolumeId: "vol_aaaaaaaaaaaa"}
 	resp, err := c.CreateSnapshot(context.Background(), req)
-	if err != nil || resp.Snapshot.ReadyToUse || resp.Snapshot.SnapshotId != "snp_000000000001" || resp.Snapshot.SizeBytes != 1<<30 {
+	if err != nil || !resp.Snapshot.ReadyToUse || resp.Snapshot.SnapshotId != "snp_000000000001" || resp.Snapshot.SizeBytes != 1<<30 {
 		t.Fatal(resp, err)
 	}
 	f.snapshots["snp_000000000001"]["status"] = "available"
@@ -519,7 +525,7 @@ func TestSnapshotReplacesFailed(t *testing.T) {
 	f.failSnapshots = 1
 	req := &csi.CreateSnapshotRequest{Name: "snapshot-1", SourceVolumeId: "vol_aaaaaaaaaaaa"}
 	r, err := c.CreateSnapshot(context.Background(), req)
-	if err != nil || r.Snapshot.SnapshotId != "snp_000000000002" || r.Snapshot.ReadyToUse {
+	if err != nil || r.Snapshot.SnapshotId != "snp_000000000002" || !r.Snapshot.ReadyToUse {
 		t.Fatal(r, err)
 	}
 	if p := f.posts("/snapshots"); len(p) != 2 || !strings.HasPrefix(p[1].Key, "csi-snapshot-1-snp_000000000001") {
@@ -543,6 +549,39 @@ func TestSnapshotReplacesFailed(t *testing.T) {
 		if s["status"] != "deleting" {
 			t.Fatal(id, s)
 		}
+	}
+}
+
+// The snapshotter keeps the first ID it is given, so an ID never comes back while creating: a
+// snapshot that fails during the wait is replaced before the call answers.
+func TestSnapshotWaitsOutCreating(t *testing.T) {
+	c, f := newController(t)
+	f.snapCreating = true
+	f.failSnapshots = 1
+	req := &csi.CreateSnapshotRequest{Name: "snapshot-1", SourceVolumeId: "vol_aaaaaaaaaaaa"}
+	// snp_1 is born failed here; snp_2 stays creating and flips to available mid-wait.
+	go func() {
+		for i := 0; i < 100; i++ {
+			time.Sleep(2 * time.Millisecond)
+			f.mu.Lock()
+			if s := f.snapshots["snp_000000000002"]; s != nil {
+				s["status"] = "available"
+				f.mu.Unlock()
+				return
+			}
+			f.mu.Unlock()
+		}
+	}()
+	r, err := c.CreateSnapshot(context.Background(), req)
+	if err != nil || r.Snapshot.SnapshotId != "snp_000000000002" || !r.Snapshot.ReadyToUse {
+		t.Fatal(r, err)
+	}
+	// Stuck in creating: Aborted, no ID.
+	c, f = newController(t)
+	f.snapCreating = true
+	r, err = c.CreateSnapshot(context.Background(), req)
+	if code(err) != codes.Aborted || r != nil {
+		t.Fatal(r, err)
 	}
 }
 
